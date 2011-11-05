@@ -30,6 +30,7 @@
 #include <OOBase/SmartPtr.h>
 #include <OOBase/Set.h>
 #include <OOBase/Condition.h>
+#include <OOBase/CDRStream.h>
 
 namespace OOKv
 {
@@ -49,16 +50,17 @@ namespace OOKv
 		BlockStore();
 		~BlockStore();
 
-		int open(const char* path, bool read_only, int& err);
+		int open(const char* path, bool read_only);
 		int close();
 
 		id_t begin_read_transaction(int& err);
-		int commit_read_transaction(const id_t& trans_id);
+		int end_read_transaction(const id_t& trans_id);
 
 		id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown());
 		int commit_write_transaction(const id_t& trans_id);
+		void rollback_write_transaction(const id_t& trans_id);
 
-		int checkpoint(const OOBase::Countdown& countdown);
+		int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown());
 
 		typedef OOBase::SmartPtr<void*> Block;
 
@@ -105,24 +107,27 @@ namespace OOKv
 		};
 
 		// Persistent data
-		id_t m_current_transaction;
+		id_t m_latest_transaction;
 		id_t m_free_list_head_block;
 
+		// Uncontrolled data
+		bool m_bReadOnly;
+
 		// Volatile data - controlled by m_lock
-		OOBase::RWMutex                    m_lock;
-		OOBase::Set<id_t>                  m_read_transactions;
+		OOBase::RWMutex                     m_lock;
+		OOBase::Set<id_t>                   m_read_transactions;
 		OOBase::TableCache<BlockSpan,Block> m_cache;
 
 		// Volatile data - controlled by m_write_lock
-		OOBase::Condition::Mutex m_write_lock;
-		OOBase::Condition        m_write_condition;
-		bool                     m_write_inprogress;
-		Block                    m_block_zero;
+		OOBase::Condition::Mutex       m_write_lock;
+		OOBase::Condition              m_write_condition;
+		bool                           m_write_inprogress;
+		Block                          m_block_zero;
+		OOBase::CDRStream              m_log;
 
 		int do_checkpoint();
 		Block load_block(const id_t& block_id, id_t& start_trans_id, int& err);
-		int apply_journal(Block& block, const BlockSpan& span);
-
+		int apply_journal(Block& block, const BlockSpan& from, const id_t& to);
 	};
 }
 

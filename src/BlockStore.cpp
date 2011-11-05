@@ -22,6 +22,22 @@
 #include "../include/config-kv.h"
 #include "../include/BlockStore.h"
 
+namespace
+{
+	namespace LogRecord
+	{
+		enum Type
+		{
+			Alloc = 0,
+			Free,
+			Diff,
+			Commit,
+
+			MAX
+		};
+	}
+}
+
 OOKv::BlockStore::BlockStore() :
 		m_cache(512),
 		m_write_inprogress(false)
@@ -32,18 +48,83 @@ OOKv::BlockStore::~BlockStore()
 {
 }
 
+int OOKv::BlockStore::open(const char* path, bool read_only)
+{
+	// Find the store file
+
+	// Check for checkpoint file
+	if (1 /* Have checkpoint file*/)
+	{
+		// The blockstore crashed during a checkpoint, attempt recovery
+
+		// We need to have read-write access
+		if (read_only)
+		{
+			// Close store file and re-open read/write
+		}
+
+		// Playback checkpoint file, updating store file
+
+		// Sync store file
+
+		// Delete checkpoint file
+
+		if (read_only)
+		{
+			// Close store file and re-open read-only
+		}
+	}
+
+	// Read the header block and init
+
+	// Find the journal file
+
+	if (!read_only)
+	{
+		if (1 /*Have journal file*/)
+		{
+			int err = do_checkpoint();
+			if (err != 0)
+				return err;
+		}
+		else
+		{
+			// Create a journal file
+		}
+	}
+
+	// Success!
+	m_bReadOnly = read_only;
+	return 0;
+}
+
+int OOKv::BlockStore::close()
+{
+	if (!m_bReadOnly)
+	{
+		int err = checkpoint();
+		if (err != 0)
+			return err;
+	}
+
+
+	// More?
+
+	return 0;
+}
+
 OOKv::id_t OOKv::BlockStore::begin_read_transaction(int& err)
 {
 	OOBase::Guard<OOBase::RWMutex> guard(m_lock);
 
-	err = m_read_transactions.insert(m_current_transaction);
+	err = m_read_transactions.insert(m_latest_transaction);
 	if (err != 0)
 		return 0;
 
-	return m_current_transaction;
+	return m_latest_transaction;
 }
 
-int OOKv::BlockStore::commit_read_transaction(const id_t& trans_id)
+int OOKv::BlockStore::end_read_transaction(const id_t& trans_id)
 {
 	OOBase::Guard<OOBase::RWMutex> guard(m_lock);
 
@@ -69,23 +150,35 @@ OOKv::id_t OOKv::BlockStore::begin_write_transaction(int& err, const OOBase::Cou
 		}
 	}
 
+	err = m_log.reset();
+	if (err != 0)
+		return 0;
+
 	m_write_inprogress = true;
 
-	return m_current_transaction+1;
+	return m_latest_transaction+1;
 }
 
 int OOKv::BlockStore::commit_write_transaction(const id_t& trans_id)
 {
 	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock);
 
-	if (!m_write_inprogress || trans_id != m_current_transaction+1)
+	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
 		return EACCES;
 
-	int err = 0;
+	// Write a commit record to the log
+	if (!m_log.write(static_cast<char>(LogRecord::Commit)) ||
+			!m_log.write(trans_id))
+	{
+		return m_log.last_error();
+	}
 
-	// Write a commit record to the journal
+	// Write the log to the journal
 
 	// Sync the journal
+
+	m_log.reset();
+	m_latest_transaction = trans_id;
 
 	// Check for checkpoint
 	if (trans_id % m_checkpoint_interval == 0)
@@ -94,11 +187,24 @@ int OOKv::BlockStore::commit_write_transaction(const id_t& trans_id)
 		do_checkpoint();
 	}
 
-	m_current_transaction = trans_id;
 	m_write_inprogress = false;
 	m_write_condition.signal();
 
-	return err;
+	return 0;
+}
+
+void OOKv::BlockStore::rollback_write_transaction(const id_t& trans_id)
+{
+	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock);
+
+	// Discard log contents
+	m_log.reset();
+
+	if (m_write_inprogress && trans_id == m_latest_transaction+1)
+	{
+		m_write_inprogress = false;
+		m_write_condition.signal();
+	}
 }
 
 int OOKv::BlockStore::checkpoint(const OOBase::Countdown& countdown)
@@ -126,6 +232,12 @@ int OOKv::BlockStore::checkpoint(const OOBase::Countdown& countdown)
 
 OOKv::BlockStore::Block OOKv::BlockStore::get_block(const id_t& block_id, const id_t& trans_id, int& err)
 {
+	if (trans_id > m_latest_transaction)
+	{
+		err = EINVAL;
+		return Block();
+	}
+
 	OOBase::ReadGuard<OOBase::RWMutex> read_guard(m_lock);
 
 	BlockSpan span(block_id,0);
@@ -173,12 +285,13 @@ OOKv::BlockStore::Block OOKv::BlockStore::get_block(const id_t& block_id, const 
 	}
 
 	// Play forward journal till trans_id
-	while (span.m_start_trans_id < trans_id)
+	if (span.m_start_trans_id < trans_id)
 	{
-		++span.m_start_trans_id;
-		err = apply_journal(block,span);
+		err = apply_journal(block,span,trans_id);
 		if (err != 0)
 			return Block();
+
+		span.m_start_trans_id = trans_id;
 	}
 
 	OOBase::Guard<OOBase::RWMutex> write_guard(m_lock);
@@ -191,7 +304,7 @@ OOKv::BlockStore::Block OOKv::BlockStore::get_block(const id_t& block_id, const 
 int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, Block block)
 {
 	// This is not a 100% race-safe check, but it will help!
-	if (!m_write_inprogress)
+	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
 		return EACCES;
 
 	// Get the previous value...
@@ -203,7 +316,15 @@ int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, B
 	if (err != 0)
 		return err;
 
-	// Write the diff of old_block -> block to the journal
+	// Write a diff block to the log
+	if (!m_log.write(static_cast<char>(LogRecord::Diff)) ||
+			!m_log.write(trans_id) ||
+			!m_log.write(block_id))
+	{
+		return m_log.last_error();
+	}
+
+	// Write the diff of old_block -> block to the log
 
 	if (err == 0)
 	{
@@ -218,24 +339,46 @@ int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, B
 int OOKv::BlockStore::free_block(const id_t& block_id, const id_t& trans_id)
 {
 	// This is not a 100% race-safe check, but it will help!
-	if (!m_write_inprogress)
+	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
 		return EACCES;
 
 	// Get the previous value...
 	if (trans_id <= 1)
 		return EINVAL;
 
-	// Write a free record to the journal
+	// Write a free block record to the log
+	if (!m_log.write(static_cast<char>(LogRecord::Free)) ||
+			!m_log.write(trans_id) ||
+			!m_log.write(block_id))
+	{
+		return m_log.last_error();
+	}
 
 	return 0;
 }
 
 OOKv::id_t OOKv::BlockStore::alloc_block(const id_t& trans_id, Block& block, int& err)
 {
+	// This is not a 100% race-safe check, but it will help!
+	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
+	{
+		err = EACCES;
+		return 0;
+	}
+
 	// Allocate new block from somewhere
+	void* TODO;
+
 	id_t block_id = 1;
 
-	// Write an alloc record to the journal
+	// Write an alloc record to the log
+	if (!m_log.write(static_cast<char>(LogRecord::Alloc)) ||
+			!m_log.write(trans_id) ||
+			!m_log.write(block_id))
+	{
+		err = m_log.last_error();
+		return 0;
+	}
 
 	if (err == 0)
 	{
@@ -249,9 +392,27 @@ OOKv::id_t OOKv::BlockStore::alloc_block(const id_t& trans_id, Block& block, int
 
 int OOKv::BlockStore::do_checkpoint()
 {
-	// Replay journal, updating the store file!
+	OOBase::ReadGuard<OOBase::RWMutex> read_guard(m_lock);
 
-	// m_current_transaction = last commit
+	id_t earliest_transaction = m_latest_transaction;
+	if (!m_read_transactions.empty())
+		earliest_transaction = *m_read_transactions.at(0);
+
+	read_guard.release();
+
+	// Play forward journal to earliest_transaction
+
+	// Update each block, writing new to checkpoint file
+
+	// Sync checkpoint file
+
+	// Truncate journal if possible
+
+	// Play forward checkpoint file, writing each block to store file
+
+	// Sync store file
+
+	// Delete checkpoint file
 
 	return 0;
 }
