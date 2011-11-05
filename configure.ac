@@ -1,7 +1,7 @@
 AC_PREREQ(2.61)
 
 AC_INIT(OOKv,0.1.0)
-AC_CONFIG_SRCDIR([src/Dummy.cpp])
+AC_CONFIG_SRCDIR([src/BlockStore.cpp])
 AC_CONFIG_HEADERS([autoheader_dummy.h include/ookv-autoconf.h])
 
 AC_CONFIG_AUX_DIR([build-aux])
