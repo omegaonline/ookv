@@ -65,8 +65,8 @@ namespace OOKv
 		Block get_block(const id_t& block_id, const id_t& trans_id, int& err);
 
 		int update_block(const id_t& block_id, const id_t& trans_id, Block block);
-		Block alloc_block(const id_t& trans_id, id_t& block_id, int& err);
-		int free_block(const id_t& trans_id, const id_t& block_id);
+		id_t alloc_block(const id_t& trans_id, Block& block, int& err);
+		int free_block(const id_t& block_id, const id_t& trans_id);
 
 	private:
 		BlockStore( const BlockStore& );
@@ -74,15 +74,43 @@ namespace OOKv
 
 		static const size_t m_checkpoint_interval = 256;
 
-		struct
+		struct BlockSpan
+		{
+			id_t m_block_id;
+			id_t m_start_trans_id;
+
+			BlockSpan(const id_t& block_id, const id_t& start_trans_id) :
+					m_block_id(block_id), m_start_trans_id(start_trans_id)
+			{}
+
+			bool operator == (const id_t& id) const
+			{
+				return (m_block_id == id);
+			}
+
+			bool operator == (const BlockSpan& rhs) const
+			{
+				return (m_block_id == rhs.m_block_id && m_start_trans_id == rhs.m_start_trans_id);
+			}
+
+			bool operator < (const id_t& id) const
+			{
+				return (m_block_id < id);
+			}
+
+			bool operator < (const BlockSpan& rhs) const
+			{
+				return (m_block_id < rhs.m_block_id || (m_block_id == rhs.m_block_id && m_start_trans_id < rhs.m_start_trans_id));
+			}
+		};
 
 		// Persistent data
 		id_t m_current_transaction;
 		id_t m_free_list_head_block;
 
 		// Volatile data - controlled by m_lock
-		OOBase::RWMutex                     m_lock;
-		OOBase::Set<id_t>                   m_read_transactions;
+		OOBase::RWMutex                    m_lock;
+		OOBase::Set<id_t>                  m_read_transactions;
 		OOBase::TableCache<BlockSpan,Block> m_cache;
 
 		// Volatile data - controlled by m_write_lock
@@ -92,10 +120,10 @@ namespace OOKv
 		Block                    m_block_zero;
 
 		int do_checkpoint();
-		int get_block_i(const id_t& block_id, const id_t& trans_id, BlockSpan& span, Block& block);
+		Block load_block(const id_t& block_id, id_t& start_trans_id, int& err);
+		int apply_journal(Block& block, const BlockSpan& span);
+
 	};
-
-
 }
 
 #endif // OOKV_BLOCKSTORE_H_INCLUDED_

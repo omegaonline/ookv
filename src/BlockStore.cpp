@@ -126,42 +126,66 @@ int OOKv::BlockStore::checkpoint(const OOBase::Countdown& countdown)
 
 OOKv::BlockStore::Block OOKv::BlockStore::get_block(const id_t& block_id, const id_t& trans_id, int& err)
 {
-	BlockSpan span;
-	Block block;
-
-	err = get_block_i(block_id,trans_id,span,block);
-
-	return block;
-}
-
-int OOKv::BlockStore::get_block_i(const id_t& block_id, const id_t& trans_id, BlockSpan& span, Block& block)
-{
 	OOBase::ReadGuard<OOBase::RWMutex> read_guard(m_lock);
 
-	BlockRef ref = { block_id, trans_id };
+	BlockSpan span(block_id,0);
+	Block block;
 
-	size_t pos = m_cache.find_first(ref);
+	// This is a prefix lookup, that will land somewhere in the set of transactions in the cache
+	size_t pos = m_cache.find_at(block_id);
 	if (pos != m_cache.npos)
 	{
+		// If we find an entry then we need to shuffle forwards and back until we hit the nearest
+		for (;pos < m_cache.size()-1; ++pos)
+		{
+			const BlockSpan* b = m_cache.key_at(pos+1);
+			if (b->m_block_id != block_id || b->m_start_trans_id >= trans_id)
+				break;
+		}
+
+		for (;pos > 0; --pos)
+		{
+			const BlockSpan* b = m_cache.key_at(pos-1);
+			if (b->m_block_id != block_id || b->m_start_trans_id <= trans_id)
+				break;
+		}
+
 		span = *m_cache.key_at(pos);
-		block = *m_cache.at(pos);
-		if (block)
-			return 0;
+
+		if (span.m_start_trans_id <= trans_id)
+		{
+			block = *m_cache.at(pos);
+			if (span.m_start_trans_id == trans_id)
+				return block;
+		}
+		else
+			span.m_start_trans_id = 0;
 	}
 
 	read_guard.release();
 
-	span.m_block_id = block_id;
-	span.m_trans_start_id = 0;
-	span.m_trans_end_id = 0;
-
-	// Load it...
-	int err = 0;
-
+	if (!block)
+	{
+		// Load up the first block in the file
+		block = load_block(block_id,span.m_start_trans_id,err);
+		if (err != 0)
+			return Block();
+	}
 
 	// Play forward journal till trans_id
+	while (span.m_start_trans_id < trans_id)
+	{
+		++span.m_start_trans_id;
+		err = apply_journal(block,span);
+		if (err != 0)
+			return Block();
+	}
 
-	return ENOENT;
+	OOBase::Guard<OOBase::RWMutex> write_guard(m_lock);
+
+	// Add the block to the cache
+	m_cache.insert(span,block);
+	return block;
 }
 
 int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, Block block)
@@ -170,9 +194,12 @@ int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, B
 	if (!m_write_inprogress)
 		return EACCES;
 
-	Block old_block;
-	BlockSpan span;
-	int err = get_block_i(block_id,trans_id-1,span,old_block);
+	// Get the previous value...
+	if (trans_id <= 1)
+		return EINVAL;
+
+	int err = 0;
+	Block prev_block = get_block(block_id,trans_id-1,err);
 	if (err != 0)
 		return err;
 
@@ -182,66 +209,42 @@ int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, B
 	{
 		// Update cache
 		OOBase::Guard<OOBase::RWMutex> guard(m_lock);
-
-		m_cache.replace(span,NULL);
-		span.m_trans_end_id = trans_id-1;
-		m_cache.insert(span,old_block);
-
-		span.m_trans_start_id = trans_id;
-		span.m_trans_end_id = 0;
-		m_cache.insert(span,block);
+		m_cache.insert(BlockSpan(block_id,trans_id),block);
 	}
 
 	return err;
 }
 
-int OOKv::BlockStore::free_block(const id_t& trans_id, const id_t& block_id)
+int OOKv::BlockStore::free_block(const id_t& block_id, const id_t& trans_id)
 {
 	// This is not a 100% race-safe check, but it will help!
 	if (!m_write_inprogress)
 		return EACCES;
 
 	// Get the previous value...
-	Block old_block;
-	BlockSpan span;
-	int err = get_block_i(block_id,trans_id-1,span,old_block);
-	if (err != 0)
-		return err;
+	if (trans_id <= 1)
+		return EINVAL;
 
 	// Write a free record to the journal
 
-	if (err == 0)
-	{
-		// Update cache
-		OOBase::Guard<OOBase::RWMutex> guard(m_lock);
-
-		m_cache.replace(span,NULL);
-		span.m_trans_end_id = trans_id-1;
-		m_cache.insert(span,old_block);
-	}
-
-	return err;
+	return 0;
 }
 
-OOKv::BlockStore::Block OOKv::BlockStore::alloc_block(const id_t& trans_id, id_t& block_id, int& err)
+OOKv::id_t OOKv::BlockStore::alloc_block(const id_t& trans_id, Block& block, int& err)
 {
-	Block new_block;
-
 	// Allocate new block from somewhere
-	err = 0;
+	id_t block_id = 1;
 
 	// Write an alloc record to the journal
 
 	if (err == 0)
 	{
-		// Add to cache
+		// Update cache
 		OOBase::Guard<OOBase::RWMutex> guard(m_lock);
-
-		BlockSpan span = { block_id, trans_id, 0 };
-		m_cache.insert(span,new_block);
+		m_cache.insert(BlockSpan(block_id,trans_id),block);
 	}
 
-	return new_block;
+	return block_id;
 }
 
 int OOKv::BlockStore::do_checkpoint()
