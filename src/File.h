@@ -19,35 +19,46 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////
 
-#ifndef OOKV_CONFIG_KV_H_INCLUDED_
-#define OOKV_CONFIG_KV_H_INCLUDED_
-
-#if defined(_MSC_VER)
-	#include "ookv-msvc.h"
-#elif !defined(DOXYGEN)
-	// Autoconf
-	#include <ookv-autoconf.h>
-#endif
-
-// Bring in oobase
-#include <config-base.h>
-
-#if defined(HAVE_STDINT_H)
-#include <stdint.h>
-#endif
+#ifndef OOKV_FILE_H_INCLUDED_
+#define OOKV_FILE_H_INCLUDED_
 
 namespace OOKv
 {
-#if defined(_MSC_VER)
-	typedef __int64 int64_t;
-	typedef unsigned __int64 uint64_t;
-#elif defined(HAVE_STDINT_H)
-#include <stdint.h>
-	using ::int64_t;
-	using ::uint64_t;
-#else
-#error Failed to work out a base type for unsigned 64bit integer.
-#endif
+	class File
+	{
+	public:
+		File();
+		~File();
+
+		static bool exists(const char* pszName);
+		static int remove(const char* pszName);
+
+		int open(const char* pszName, bool read_only);
+		int create(const char* pszName, bool truncate_existing);
+		int close();
+
+		int write(const void* data, size_t length);
+		int read(void* data, size_t length);
+
+		template <typename T>
+		int write(T val)
+		{
+			return write(&val,sizeof(T));
+		}
+
+		template <typename T>
+		int read(T& val)
+		{
+			return read(&val,sizeof(T));
+		}
+
+		uint64_t tell() const;
+		int seek_begin(uint64_t pos);
+		int seek_cur(int64_t pos);
+		int seek_end(uint64_t pos);
+
+		int sync();
+	};
 }
 
-#endif //OOKV_CONFIG_KV_H_INCLUDED_
+#endif // OOKV_FILE_H_INCLUDED_

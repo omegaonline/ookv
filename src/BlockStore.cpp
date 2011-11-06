@@ -20,10 +20,21 @@
 ///////////////////////////////////////////////////////////////////////////////////
 
 #include "../include/config-kv.h"
+
+#include <OOBase/Cache.h>
+#include <OOBase/Set.h>
+#include <OOBase/Condition.h>
+#include <OOBase/CDRStream.h>
+
 #include "../include/BlockStore.h"
+#include "File.h"
+
+using namespace OOKv;
 
 namespace
 {
+	const size_t s_checkpoint_interval = 256;
+
 	namespace LogRecord
 	{
 		enum Type
@@ -36,84 +47,141 @@ namespace
 			MAX
 		};
 	}
-}
 
-OOKv::BlockStore::BlockStore() :
-		m_cache(512),
-		m_write_inprogress(false)
-{
-}
-
-OOKv::BlockStore::~BlockStore()
-{
-}
-
-int OOKv::BlockStore::open(const char* path, bool read_only)
-{
-	// Find the store file
-
-	// Check for checkpoint file
-	if (1 /* Have checkpoint file*/)
+	struct BlockSpan
 	{
-		// The blockstore crashed during a checkpoint, attempt recovery
+		id_t m_block_id;
+		id_t m_start_trans_id;
 
-		// We need to have read-write access
-		if (read_only)
+		BlockSpan(const id_t& block_id, const id_t& start_trans_id) :
+				m_block_id(block_id), m_start_trans_id(start_trans_id)
+		{}
+
+		bool operator == (const id_t& id) const
 		{
-			// Close store file and re-open read/write
+			return (m_block_id == id);
 		}
 
-		// Playback checkpoint file, updating store file
-
-		// Sync store file
-
-		// Delete checkpoint file
-
-		if (read_only)
+		bool operator < (const id_t& id) const
 		{
-			// Close store file and re-open read-only
+			return (m_block_id < id);
 		}
-	}
 
-	// Read the header block and init
+		bool operator == (const BlockSpan& rhs) const
+		{
+			return (m_block_id == rhs.m_block_id && m_start_trans_id == rhs.m_start_trans_id);
+		}
 
-	// Find the journal file
+		bool operator < (const BlockSpan& rhs) const
+		{
+			return (m_block_id < rhs.m_block_id || (m_block_id == rhs.m_block_id && m_start_trans_id < rhs.m_start_trans_id));
+		}
+	};
 
-	if (!read_only)
+	class BlockStoreBase : public OOKv::BlockStore
 	{
-		if (1 /*Have journal file*/)
-		{
-			int err = do_checkpoint();
-			if (err != 0)
-				return err;
-		}
-		else
-		{
-			// Create a journal file
-		}
-	}
+	public:
+		BlockStoreBase();
 
-	// Success!
-	m_bReadOnly = read_only;
-	return 0;
+		virtual int open_i(const char* path) = 0;
+
+		int load_store();
+
+		id_t begin_read_transaction(int& err);
+		int end_read_transaction(const id_t& trans_id);
+
+		Block get_block(const id_t& block_id, const id_t& trans_id, int& err);
+
+		// Persistent data
+		id_t m_latest_transaction;
+		id_t m_free_list_head_block;
+
+		// Volatile data - controlled by m_lock
+		OOBase::RWMutex                     m_lock;
+		OOBase::Set<id_t>                   m_read_transactions;
+		OOBase::TableCache<BlockSpan,Block> m_cache;
+		File                                m_store_file;
+
+	private:
+		Block load_block(const id_t& block_id, id_t& start_trans_id, int& err);
+		int apply_journal(Block& block, const BlockSpan& from, const id_t& to);
+	};
+
+	class BlockStoreRO : public BlockStoreBase
+	{
+	public:
+		int open_i(const char* path);
+
+		id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown()) { err=EROFS; return 0;}
+		int commit_write_transaction(const id_t& trans_id) { return EROFS; }
+		void rollback_write_transaction(const id_t& trans_id) {}
+
+		int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown()) { return EROFS; }
+
+		int update_block(const id_t& block_id, const id_t& trans_id, Block block) { return EROFS; }
+		id_t alloc_block(const id_t& trans_id, Block& block, int& err) { err=EROFS; return 0; }
+		int free_block(const id_t& block_id, const id_t& trans_id) { return EROFS; }
+	};
+
+	class BlockStoreRW : public BlockStoreBase
+	{
+	public:
+		BlockStoreRW();
+		~BlockStoreRW();
+
+		int open_i(const char* path);
+
+		id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown());
+		int commit_write_transaction(const id_t& trans_id);
+		void rollback_write_transaction(const id_t& trans_id);
+
+		int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown());
+
+		int update_block(const id_t& block_id, const id_t& trans_id, Block block);
+		id_t alloc_block(const id_t& trans_id, Block& block, int& err);
+		int free_block(const id_t& block_id, const id_t& trans_id);
+
+	private:
+		// Volatile data - controlled by m_write_lock
+		OOBase::Condition::Mutex       m_write_lock;
+		OOBase::Condition              m_write_condition;
+		bool                           m_write_inprogress;
+		OOBase::CDRStream              m_log;
+
+		int do_checkpoint();
+		int apply_checkpoint(File& checkpoint, const OOBase::LocalString& checkpoint_path);
+	};
+
+	template <typename T>
+	OOBase::RefPtr<OOKv::BlockStore> open_t(const char* path, int& err)
+	{
+		OOBase::RefPtr<T> store = new (std::nothrow) T();
+		if (!store)
+			err = ERROR_OUTOFMEMORY;
+		else if ((store->open_i(path)) != 0)
+		{
+			store->release();
+			store = NULL;
+		}
+
+		return static_cast<BlockStore*>(store);
+	}
 }
 
-int OOKv::BlockStore::close()
+OOBase::RefPtr<OOKv::BlockStore> OOKv::BlockStore::open(const char* path, bool read_only, int& err)
 {
-	if (!m_bReadOnly)
-	{
-		int err = checkpoint();
-		if (err != 0)
-			return err;
-	}
-
-
-	// More?
-
-	return 0;
+	if (read_only)
+		return open_t<BlockStoreRO>(path,err);
+	else
+		return open_t<BlockStoreRW>(path,err);
 }
 
-OOKv::id_t OOKv::BlockStore::begin_read_transaction(int& err)
+BlockStoreBase::BlockStoreBase() :
+		m_cache(512)
+{
+}
+
+OOKv::id_t BlockStoreBase::begin_read_transaction(int& err)
 {
 	OOBase::Guard<OOBase::RWMutex> guard(m_lock);
 
@@ -124,113 +192,14 @@ OOKv::id_t OOKv::BlockStore::begin_read_transaction(int& err)
 	return m_latest_transaction;
 }
 
-int OOKv::BlockStore::end_read_transaction(const id_t& trans_id)
+int BlockStoreBase::end_read_transaction(const id_t& trans_id)
 {
 	OOBase::Guard<OOBase::RWMutex> guard(m_lock);
 
 	return m_read_transactions.remove(trans_id);
 }
 
-OOKv::id_t OOKv::BlockStore::begin_write_transaction(int& err, const OOBase::Countdown& countdown)
-{
-	// Acquire the lock with a timeout
-	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock,false);
-	if (!guard.acquire(countdown))
-	{
-		err = ETIMEDOUT;
-		return 0;
-	}
-
-	while (m_write_inprogress)
-	{
-		if (!m_write_condition.wait(m_write_lock,countdown))
-		{
-			err = ETIMEDOUT;
-			return 0;
-		}
-	}
-
-	err = m_log.reset();
-	if (err != 0)
-		return 0;
-
-	m_write_inprogress = true;
-
-	return m_latest_transaction+1;
-}
-
-int OOKv::BlockStore::commit_write_transaction(const id_t& trans_id)
-{
-	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock);
-
-	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
-		return EACCES;
-
-	// Write a commit record to the log
-	if (!m_log.write(static_cast<char>(LogRecord::Commit)) ||
-			!m_log.write(trans_id))
-	{
-		return m_log.last_error();
-	}
-
-	// Write the log to the journal
-
-	// Sync the journal
-
-	m_log.reset();
-	m_latest_transaction = trans_id;
-
-	// Check for checkpoint
-	if (trans_id % m_checkpoint_interval == 0)
-	{
-		// Ignore error... it will get picked up again...
-		do_checkpoint();
-	}
-
-	m_write_inprogress = false;
-	m_write_condition.signal();
-
-	return 0;
-}
-
-void OOKv::BlockStore::rollback_write_transaction(const id_t& trans_id)
-{
-	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock);
-
-	// Discard log contents
-	m_log.reset();
-
-	if (m_write_inprogress && trans_id == m_latest_transaction+1)
-	{
-		m_write_inprogress = false;
-		m_write_condition.signal();
-	}
-}
-
-int OOKv::BlockStore::checkpoint(const OOBase::Countdown& countdown)
-{
-	// Acquire the lock with a timeout
-	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock,false);
-	if (!guard.acquire(countdown))
-		return ETIMEDOUT;
-
-	while (m_write_inprogress)
-	{
-		if (!m_write_condition.wait(m_write_lock,countdown))
-			return ETIMEDOUT;
-	}
-
-	m_write_inprogress = true;
-
-	int err = do_checkpoint();
-
-	m_write_inprogress = false;
-	m_write_condition.signal();
-
-	return err;
-}
-
-OOKv::BlockStore::Block OOKv::BlockStore::get_block(const id_t& block_id, const id_t& trans_id, int& err)
+BlockStore::Block BlockStoreBase::get_block(const id_t& block_id, const id_t& trans_id, int& err)
 {
 	if (trans_id > m_latest_transaction)
 	{
@@ -301,7 +270,178 @@ OOKv::BlockStore::Block OOKv::BlockStore::get_block(const id_t& block_id, const 
 	return block;
 }
 
-int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, Block block)
+int BlockStoreRO::open_i(const char* path)
+{
+	// Find the store file
+	if (!File::exists(path))
+		return ENOENT;
+
+	// Open read only
+	int err = m_store_file.open(path,true);
+	if (err == 0)
+		err = load_store();
+
+	return err;
+}
+
+BlockStoreRW::BlockStoreRW() : BlockStoreBase(),
+		m_write_inprogress(false)
+{
+}
+
+BlockStoreRW::~BlockStoreRW()
+{
+	checkpoint();
+}
+
+int BlockStoreRW::open_i(const char* path)
+{
+	// Find the store file
+	if (!File::exists(path))
+		return ENOENT;
+
+	// Build the filenames
+	OOBase::LocalString checkpoint_path, journal_path;
+	int err = checkpoint_path.concat(path,".checkpoint");
+	if (err == 0)
+		err = journal_path.concat(path,".journal");
+	if (err != 0)
+		return err;
+
+	// Open read/write
+	if ((err = m_store_file.open(path,false)) != 0)
+		return err;
+
+	// Load the store
+	if ((err = load_store()) != 0)
+		return err;
+
+	// Check for checkpoint file
+	if (File::exists(checkpoint_path.c_str()))
+	{
+		// The blockstore crashed during a checkpoint, attempt recovery
+
+		// Open checkpoint file read only
+		File checkpoint;
+		if ((err = checkpoint.open(checkpoint_path.c_str(),true)) == 0)
+		{
+			err = apply_checkpoint(checkpoint,checkpoint_path);
+		}
+
+		if (err != 0)
+			return err;
+	}
+
+	// Find the journal file
+	if (File::exists(journal_path.c_str()))
+	{
+		// Ignore errors, the store is safe anyway
+		do_checkpoint();
+	}
+
+	return 0;
+}
+
+OOKv::id_t BlockStoreRW::begin_write_transaction(int& err, const OOBase::Countdown& countdown)
+{
+	// Acquire the lock with a timeout
+	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock,false);
+	if (!guard.acquire(countdown))
+	{
+		err = ETIMEDOUT;
+		return 0;
+	}
+
+	while (m_write_inprogress)
+	{
+		if (!m_write_condition.wait(m_write_lock,countdown))
+		{
+			err = ETIMEDOUT;
+			return 0;
+		}
+	}
+
+	err = m_log.reset();
+	if (err != 0)
+		return 0;
+
+	m_write_inprogress = true;
+
+	return m_latest_transaction+1;
+}
+
+int BlockStoreRW::commit_write_transaction(const id_t& trans_id)
+{
+	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock);
+
+	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
+		return EACCES;
+
+	// Write a commit record to the log
+	if (!m_log.write(static_cast<char>(LogRecord::Commit)) ||
+			!m_log.write(trans_id))
+	{
+		return m_log.last_error();
+	}
+
+	// Write the log to the journal
+
+	// Sync the journal
+
+	m_log.reset();
+	m_latest_transaction = trans_id;
+
+	// Check for checkpoint
+	if (trans_id % s_checkpoint_interval == 0)
+	{
+		// Ignore error... it will get picked up again...
+		do_checkpoint();
+	}
+
+	m_write_inprogress = false;
+	m_write_condition.signal();
+
+	return 0;
+}
+
+void BlockStoreRW::rollback_write_transaction(const id_t& trans_id)
+{
+	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock);
+
+	// Discard log contents
+	m_log.reset();
+
+	if (m_write_inprogress && trans_id == m_latest_transaction+1)
+	{
+		m_write_inprogress = false;
+		m_write_condition.signal();
+	}
+}
+
+int BlockStoreRW::checkpoint(const OOBase::Countdown& countdown)
+{
+	// Acquire the lock with a timeout
+	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock,false);
+	if (!guard.acquire(countdown))
+		return ETIMEDOUT;
+
+	while (m_write_inprogress)
+	{
+		if (!m_write_condition.wait(m_write_lock,countdown))
+			return ETIMEDOUT;
+	}
+
+	m_write_inprogress = true;
+
+	int err = do_checkpoint();
+
+	m_write_inprogress = false;
+	m_write_condition.signal();
+
+	return err;
+}
+
+int BlockStoreRW::update_block(const id_t& block_id, const id_t& trans_id, Block block)
 {
 	// This is not a 100% race-safe check, but it will help!
 	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
@@ -336,7 +476,7 @@ int OOKv::BlockStore::update_block(const id_t& block_id, const id_t& trans_id, B
 	return err;
 }
 
-int OOKv::BlockStore::free_block(const id_t& block_id, const id_t& trans_id)
+int BlockStoreRW::free_block(const id_t& block_id, const id_t& trans_id)
 {
 	// This is not a 100% race-safe check, but it will help!
 	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
@@ -357,7 +497,7 @@ int OOKv::BlockStore::free_block(const id_t& block_id, const id_t& trans_id)
 	return 0;
 }
 
-OOKv::id_t OOKv::BlockStore::alloc_block(const id_t& trans_id, Block& block, int& err)
+OOKv::id_t BlockStoreRW::alloc_block(const id_t& trans_id, Block& block, int& err)
 {
 	// This is not a 100% race-safe check, but it will help!
 	if (!m_write_inprogress || trans_id != m_latest_transaction+1)
@@ -390,7 +530,7 @@ OOKv::id_t OOKv::BlockStore::alloc_block(const id_t& trans_id, Block& block, int
 	return block_id;
 }
 
-int OOKv::BlockStore::do_checkpoint()
+int BlockStoreRW::do_checkpoint()
 {
 	OOBase::ReadGuard<OOBase::RWMutex> read_guard(m_lock);
 
@@ -400,19 +540,47 @@ int OOKv::BlockStore::do_checkpoint()
 
 	read_guard.release();
 
+	OOBase::LocalString checkpoint_path;
+	int err = checkpoint_path.concat(path,".checkpoint");
+	if (err != 0)
+		return err;
+
+	File checkpoint;
+	if ((err = checkpoint.create(checkpoint_path.c_str(),false)) != 0)
+		return err;
+
 	// Play forward journal to earliest_transaction
 
 	// Update each block, writing new to checkpoint file
 
 	// Sync checkpoint file
+	if ((err = checkpoint.sync()) != 0)
+		return err;
+
+	// Play forward checkpoint file, writing each block to store file
+	if ((err = apply_checkpoint(checkpoint,checkpoint_path)) != 0)
+		return err;
 
 	// Truncate journal if possible
 
-	// Play forward checkpoint file, writing each block to store file
+	return 0;
+}
+
+int BlockStoreRW::apply_checkpoint(File& checkpoint, const OOBase::LocalString& checkpoint_path)
+{
+	// Playback checkpoint file, updating store file
+	int err = 0;
+
+
 
 	// Sync store file
+	if (err == 0 && (err = m_store_file.sync()) == 0)
+	{
+		checkpoint.close();
 
-	// Delete checkpoint file
+		// Delete checkpoint file
+		File::remove(checkpoint_path.c_str());
+	}
 
-	return 0;
+	return err;
 }

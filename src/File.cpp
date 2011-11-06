@@ -19,35 +19,6 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////
 
-#ifndef OOKV_CONFIG_KV_H_INCLUDED_
-#define OOKV_CONFIG_KV_H_INCLUDED_
+#include "../include/config-kv.h"
+#include "File.h"
 
-#if defined(_MSC_VER)
-	#include "ookv-msvc.h"
-#elif !defined(DOXYGEN)
-	// Autoconf
-	#include <ookv-autoconf.h>
-#endif
-
-// Bring in oobase
-#include <config-base.h>
-
-#if defined(HAVE_STDINT_H)
-#include <stdint.h>
-#endif
-
-namespace OOKv
-{
-#if defined(_MSC_VER)
-	typedef __int64 int64_t;
-	typedef unsigned __int64 uint64_t;
-#elif defined(HAVE_STDINT_H)
-#include <stdint.h>
-	using ::int64_t;
-	using ::uint64_t;
-#else
-#error Failed to work out a base type for unsigned 64bit integer.
-#endif
-}
-
-#endif //OOKV_CONFIG_KV_H_INCLUDED_

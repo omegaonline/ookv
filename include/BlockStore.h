@@ -26,11 +26,7 @@
 #include <stdint.h>
 #endif
 
-#include <OOBase/Cache.h>
 #include <OOBase/SmartPtr.h>
-#include <OOBase/Set.h>
-#include <OOBase/Condition.h>
-#include <OOBase/CDRStream.h>
 
 namespace OOKv
 {
@@ -44,90 +40,30 @@ namespace OOKv
 #error Failed to work out a base type for unsigned 64bit integer.
 #endif
 
-	class BlockStore
+	class BlockStore : public OOBase::RefCounted
 	{
 	public:
-		BlockStore();
-		~BlockStore();
+		static OOBase::RefPtr<BlockStore> open(const char* path, bool read_only, int& err);
 
-		int open(const char* path, bool read_only);
-		int close();
+		virtual id_t begin_read_transaction(int& err) = 0;
+		virtual int end_read_transaction(const id_t& trans_id) = 0;
 
-		id_t begin_read_transaction(int& err);
-		int end_read_transaction(const id_t& trans_id);
+		virtual id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown()) = 0;
+		virtual int commit_write_transaction(const id_t& trans_id) = 0;
+		virtual void rollback_write_transaction(const id_t& trans_id) = 0;
 
-		id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown());
-		int commit_write_transaction(const id_t& trans_id);
-		void rollback_write_transaction(const id_t& trans_id);
-
-		int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown());
+		virtual int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown()) = 0;
 
 		typedef OOBase::SmartPtr<void*> Block;
 
-		Block get_block(const id_t& block_id, const id_t& trans_id, int& err);
+		virtual Block get_block(const id_t& block_id, const id_t& trans_id, int& err) = 0;
 
-		int update_block(const id_t& block_id, const id_t& trans_id, Block block);
-		id_t alloc_block(const id_t& trans_id, Block& block, int& err);
-		int free_block(const id_t& block_id, const id_t& trans_id);
+		virtual int update_block(const id_t& block_id, const id_t& trans_id, Block block) = 0;
+		virtual id_t alloc_block(const id_t& trans_id, Block& block, int& err) = 0;
+		virtual int free_block(const id_t& block_id, const id_t& trans_id) = 0;
 
-	private:
-		BlockStore( const BlockStore& );
-		BlockStore& operator = ( const BlockStore& );
-
-		static const size_t m_checkpoint_interval = 256;
-
-		struct BlockSpan
-		{
-			id_t m_block_id;
-			id_t m_start_trans_id;
-
-			BlockSpan(const id_t& block_id, const id_t& start_trans_id) :
-					m_block_id(block_id), m_start_trans_id(start_trans_id)
-			{}
-
-			bool operator == (const id_t& id) const
-			{
-				return (m_block_id == id);
-			}
-
-			bool operator == (const BlockSpan& rhs) const
-			{
-				return (m_block_id == rhs.m_block_id && m_start_trans_id == rhs.m_start_trans_id);
-			}
-
-			bool operator < (const id_t& id) const
-			{
-				return (m_block_id < id);
-			}
-
-			bool operator < (const BlockSpan& rhs) const
-			{
-				return (m_block_id < rhs.m_block_id || (m_block_id == rhs.m_block_id && m_start_trans_id < rhs.m_start_trans_id));
-			}
-		};
-
-		// Persistent data
-		id_t m_latest_transaction;
-		id_t m_free_list_head_block;
-
-		// Uncontrolled data
-		bool m_bReadOnly;
-
-		// Volatile data - controlled by m_lock
-		OOBase::RWMutex                     m_lock;
-		OOBase::Set<id_t>                   m_read_transactions;
-		OOBase::TableCache<BlockSpan,Block> m_cache;
-
-		// Volatile data - controlled by m_write_lock
-		OOBase::Condition::Mutex       m_write_lock;
-		OOBase::Condition              m_write_condition;
-		bool                           m_write_inprogress;
-		Block                          m_block_zero;
-		OOBase::CDRStream              m_log;
-
-		int do_checkpoint();
-		Block load_block(const id_t& block_id, id_t& start_trans_id, int& err);
-		int apply_journal(Block& block, const BlockSpan& from, const id_t& to);
+	protected:
+		BlockStore() : OOBase::RefCounted() {};
 	};
 }
 
