@@ -43,6 +43,8 @@ namespace OOKv
 	class BlockStore : public OOBase::RefCounted
 	{
 	public:
+		static const size_t s_block_size = 4096;
+
 		static OOBase::RefPtr<BlockStore> open(const char* path, bool read_only, int& err);
 
 		virtual id_t begin_read_transaction(int& err) = 0;

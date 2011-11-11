@@ -41,10 +41,14 @@ namespace OOKv
 #if defined(_MSC_VER)
 	typedef __int64 int64_t;
 	typedef unsigned __int64 uint64_t;
+
+	typedef unsigned __int16 uint16_t;
 #elif defined(HAVE_STDINT_H)
 #include <stdint.h>
 	using ::int64_t;
 	using ::uint64_t;
+
+	using ::uint16_t;
 #else
 #error Failed to work out a base type for unsigned 64bit integer.
 #endif

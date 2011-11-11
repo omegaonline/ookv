@@ -56,6 +56,7 @@ noinst_LTLIBRARIES = libookv.la
 
 libookv_la_SOURCES = \
 	include/BlockStore.h \
+	src/config-kv.h \
 	src/BlockStore.cpp \
 	src/File.h \
 	src/File.cpp
