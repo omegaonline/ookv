@@ -95,6 +95,8 @@ namespace
 
 		Block get_block(const id_t& block_id, const id_t& trans_id, int& err);
 
+		int validate_checkpoint_file(File& file);
+
 		// Persistent data
 		id_t m_last_transaction;
 		id_t m_first_transaction;
@@ -170,9 +172,9 @@ namespace
 	};
 
 	template <typename T>
-	OOBase::RefPtr<OOKv::BlockStore> open_t(const char* path, int& err)
+	OOKv::BlockStore* open_t(const char* path, int& err)
 	{
-		OOBase::RefPtr<T> store = new (std::nothrow) T();
+		T* store = new (std::nothrow) T();
 		if (!store)
 			err = ERROR_OUTOFMEMORY;
 		else if ((store->open_i(path)) != 0)
@@ -185,7 +187,7 @@ namespace
 	}
 }
 
-OOBase::RefPtr<OOKv::BlockStore> OOKv::BlockStore::open(const char* path, bool read_only, int& err)
+OOKv::BlockStore* OOKv::BlockStore::open(const char* path, bool read_only, int& err)
 {
 	if (read_only)
 		return open_t<BlockStoreRO>(path,err);
@@ -224,7 +226,7 @@ int BlockStoreBase::load(const char* path, bool read_only)
 		m_journal_file = m_store_directory.create_file(journal_name.c_str(),false,err);
 
 	// Init m_journal_start from the store m_first_transaction
-
+	void* TODO;
 
 	return err;
 }
@@ -326,6 +328,13 @@ BlockStore::Block BlockStoreBase::get_block(const id_t& block_id, const id_t& tr
 	return block;
 }
 
+int BlockStoreBase::validate_checkpoint_file(File& file)
+{
+	void* TODO;
+
+	return 0;
+}
+
 int BlockStoreRO::open_i(const char* path)
 {
 	int err = load(path,true);
@@ -338,7 +347,12 @@ int BlockStoreRO::open_i(const char* path)
 		return err;
 
 	if (m_store_directory.file_exists(checkpoint_name.c_str()))
+	{
 		m_checkpoint_file = m_store_directory.open_file(checkpoint_name.c_str(),true,err);
+
+		// Validate checkpoint file...
+		err = validate_checkpoint_file(m_checkpoint_file);
+	}
 
 	return err;
 }
@@ -785,7 +799,8 @@ int BlockStoreRW::apply_checkpoint(File& checkpoint_file, bool validate)
 	// Check the start of the checkpoint file to see if it has a matching ID
 	if (validate)
 	{
-		void* TODO;
+		if ((err = validate_checkpoint_file(checkpoint_file)) != 0)
+			return err;
 	}
 
 	for (;;)
