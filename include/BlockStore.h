@@ -50,11 +50,11 @@ namespace OOKv
 		virtual id_t begin_read_transaction(int& err) = 0;
 		virtual int end_read_transaction(const id_t& trans_id) = 0;
 
-		virtual id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown()) = 0;
+		virtual id_t begin_write_transaction(int& err, const OOBase::Timeout& timeout = OOBase::Timeout()) = 0;
 		virtual int commit_write_transaction(const id_t& trans_id) = 0;
 		virtual void rollback_write_transaction(const id_t& trans_id) = 0;
 
-		virtual int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown()) = 0;
+		virtual int checkpoint(const OOBase::Timeout& timeout = OOBase::Timeout()) = 0;
 
 		typedef OOBase::SmartPtr<void*> Block;
 
