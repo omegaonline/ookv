@@ -128,11 +128,11 @@ namespace
 
 		Block load_block(const id_t& block_id, id_t& start_trans_id, int& err);
 
-		id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown()) { err=EROFS; return 0;}
+		id_t begin_write_transaction(int& err, const OOBase::Timeout& timeout = OOBase::Timeout()) { err=EROFS; return 0;}
 		int commit_write_transaction(const id_t& trans_id) { return EROFS; }
 		void rollback_write_transaction(const id_t& trans_id) {}
 
-		int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown()) { return EROFS; }
+		int checkpoint(const OOBase::Timeout& timeout = OOBase::Timeout()) { return EROFS; }
 
 		int update_block(const id_t& block_id, const id_t& trans_id, Block block) { return EROFS; }
 		id_t alloc_block(const id_t& trans_id, Block& block, int& err) { err=EROFS; return 0; }
@@ -150,11 +150,11 @@ namespace
 
 		int open_i(const char* path);
 
-		id_t begin_write_transaction(int& err, const OOBase::Countdown& countdown = OOBase::Countdown());
+		id_t begin_write_transaction(int& err, const OOBase::Timeout& timeout = OOBase::Timeout());
 		int commit_write_transaction(const id_t& trans_id);
 		void rollback_write_transaction(const id_t& trans_id);
 
-		int checkpoint(const OOBase::Countdown& countdown = OOBase::Countdown());
+		int checkpoint(const OOBase::Timeout& timeout = OOBase::Timeout());
 
 		int update_block(const id_t& block_id, const id_t& trans_id, Block block);
 		id_t alloc_block(const id_t& trans_id, Block& block, int& err);
@@ -428,11 +428,11 @@ int BlockStoreRW::open_i(const char* path)
 	return err;
 }
 
-OOKv::id_t BlockStoreRW::begin_write_transaction(int& err, const OOBase::Countdown& countdown)
+OOKv::id_t BlockStoreRW::begin_write_transaction(int& err, const OOBase::Timeout& timeout)
 {
 	// Acquire the lock with a timeout
 	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock,false);
-	if (!guard.acquire(countdown))
+	if (!guard.acquire(timeout))
 	{
 		err = ETIMEDOUT;
 		return 0;
@@ -440,7 +440,7 @@ OOKv::id_t BlockStoreRW::begin_write_transaction(int& err, const OOBase::Countdo
 
 	while (m_write_inprogress)
 	{
-		if (!m_write_condition.wait(m_write_lock,countdown))
+		if (!m_write_condition.wait(m_write_lock,timeout))
 		{
 			err = ETIMEDOUT;
 			return 0;
@@ -545,16 +545,16 @@ void BlockStoreRW::rollback_write_transaction(const id_t& trans_id)
 	}
 }
 
-int BlockStoreRW::checkpoint(const OOBase::Countdown& countdown)
+int BlockStoreRW::checkpoint(const OOBase::Timeout& timeout)
 {
 	// Acquire the lock with a timeout
 	OOBase::Guard<OOBase::Condition::Mutex> guard(m_write_lock,false);
-	if (!guard.acquire(countdown))
+	if (!guard.acquire(timeout))
 		return ETIMEDOUT;
 
 	while (m_write_inprogress)
 	{
-		if (!m_write_condition.wait(m_write_lock,countdown))
+		if (!m_write_condition.wait(m_write_lock,timeout))
 			return ETIMEDOUT;
 	}
 
